@@ -12,3 +12,4 @@ pandas
 spacy
 sentence-transformers
 langdetect
+tiktoken
