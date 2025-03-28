@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import torch
 import torch.nn as nn
@@ -6,8 +5,9 @@ from transformers import BertTokenizer, BertModel
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import numpy as np
 import pickle
+from sklearn.decomposition import PCA  # Explicitly import PCA
 
-# Your LSTMClassifier class (unchanged)
+# LSTMClassifier class (unchanged)
 class LSTMClassifier(nn.Module):
     def __init__(self, input_size, hidden_size, num_classes, num_layers=2, dropout=0.3, bidirectional=True):
         super(LSTMClassifier, self).__init__()
@@ -40,25 +40,37 @@ def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Load LSTM model
-    model = LSTMClassifier(input_size=257, hidden_size=512, num_classes=3).to(device)
-    model.load_state_dict(torch.load('model.pth', map_location=device))
-    model.eval()
+    try:
+        model = LSTMClassifier(input_size=257, hidden_size=512, num_classes=3).to(device)
+        model.load_state_dict(torch.load('model.pth', map_location=device))
+        model.eval()
+    except Exception as e:
+        st.error(f"Error loading LSTM model: {e}")
+        return None, None, None, None, None, None
     
     # Load BERT components
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    bert_model = BertModel.from_pretrained("bert-base-uncased").to(device)
-    bert_model.eval()
+    try:
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        bert_model = BertModel.from_pretrained("bert-base-uncased").to(device)
+        bert_model.eval()
+    except Exception as e:
+        st.error(f"Error loading BERT model: {e}")
+        return None, None, None, None, None, None
     
     # Load PCA
-    with open('pca_model.pkl', 'rb') as f:
-        pca = pickle.load(f)
+    try:
+        with open('pca_model.pkl', 'rb') as f:
+            pca = pickle.load(f)
+    except Exception as e:
+        st.error(f"Error loading PCA model: {e}")
+        return None, None, None, None, None, None
     
     # Initialize VADER
     analyzer = SentimentIntensityAnalyzer()
     
     return model, tokenizer, bert_model, pca, analyzer, device
 
-# Preprocessing and prediction functions (slightly modified)
+# Preprocessing and prediction functions
 def preprocess_sentence(sentence, tokenizer, bert_model, device):
     tokens = tokenizer(
         [sentence],
@@ -74,18 +86,22 @@ def preprocess_sentence(sentence, tokenizer, bert_model, device):
     return cls_embeddings
 
 def predict_sentence(sentence, model, tokenizer, bert_model, pca, analyzer, device):
-    cls_embeddings = preprocess_sentence(sentence, tokenizer, bert_model, device)
-    cls_embeddings_np = cls_embeddings.cpu().numpy()
-    pca_embeddings = pca.transform(cls_embeddings_np)
-    vader_score = analyzer.polarity_scores(sentence)['compound']
-    sentence_features = np.concatenate([[vader_score], pca_embeddings[0]])
-    sentence_features_tensor = torch.tensor(sentence_features, dtype=torch.float32).unsqueeze(0).unsqueeze(1).to(device)
-    with torch.no_grad():
-        outputs = model(sentence_features_tensor)
-        _, predicted = torch.max(outputs.data, 1)
-    sentiment_label = predicted.item()
-    sentiment = ['Negative', 'Neutral', 'Positive'][sentiment_label]
-    return sentiment
+    try:
+        cls_embeddings = preprocess_sentence(sentence, tokenizer, bert_model, device)
+        cls_embeddings_np = cls_embeddings.cpu().numpy()
+        pca_embeddings = pca.transform(cls_embeddings_np)
+        vader_score = analyzer.polarity_scores(sentence)['compound']
+        sentence_features = np.concatenate([[vader_score], pca_embeddings[0]])
+        sentence_features_tensor = torch.tensor(sentence_features, dtype=torch.float32).unsqueeze(0).unsqueeze(1).to(device)
+        with torch.no_grad():
+            outputs = model(sentence_features_tensor)
+            _, predicted = torch.max(outputs.data, 1)
+        sentiment_label = predicted.item()
+        sentiment = ['Negative', 'Neutral', 'Positive'][sentiment_label]
+        return sentiment
+    except Exception as e:
+        st.error(f"Prediction error: {e}")
+        return None
 
 # Streamlit interface
 def main():
@@ -94,6 +110,9 @@ def main():
 
     # Load models
     model, tokenizer, bert_model, pca, analyzer, device = load_models()
+    
+    if model is None:
+        return  # Stop execution if models failed to load
 
     # User input
     user_input = st.text_area("Enter your text here:", height=150)
@@ -102,14 +121,13 @@ def main():
         if user_input:
             with st.spinner("Analyzing..."):
                 sentiment = predict_sentence(user_input, model, tokenizer, bert_model, pca, analyzer, device)
-                
-                # Display results with styling
-                if sentiment == "Positive":
-                    st.success(f"Sentiment: {sentiment} 😊")
-                elif sentiment == "Negative":
-                    st.error(f"Sentiment: {sentiment} 😔")
-                else:
-                    st.info(f"Sentiment: {sentiment} 😐")
+                if sentiment:
+                    if sentiment == "Positive":
+                        st.success(f"Sentiment: {sentiment} 😊")
+                    elif sentiment == "Negative":
+                        st.error(f"Sentiment: {sentiment} 😔")
+                    else:
+                        st.info(f"Sentiment: {sentiment} 😐")
         else:
             st.warning("Please enter some text to analyze!")
 
