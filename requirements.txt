@@ -4,3 +4,4 @@ transformers
 vaderSentiment
 numpy
 pickle-mixin
+scikit-learn  # Added for PCA
