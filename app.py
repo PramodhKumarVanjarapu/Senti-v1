@@ -1,7 +1,7 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-from transformers import BertTokenizer, BertModel, AutoTokenizer, AutoModelForSequenceClassification, pipeline
+from transformers import BertTokenizer, BertModel
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import numpy as np
 import pickle
@@ -12,11 +12,6 @@ import matplotlib.pyplot as plt
 import nltk
 from nltk.tokenize import word_tokenize
 import pandas as pd
-from io import StringIO
-import spacy
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-from langdetect import detect
 import os
 import gc
 
@@ -56,41 +51,32 @@ def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if not os.path.exists('model.pth'):
         st.error("model.pth not found. Please upload the LSTM model file to your Streamlit Cloud repository.")
-        return None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None
     try:
         model = LSTMClassifier(input_size=257, hidden_size=512, num_classes=3).to(device)
         model.load_state_dict(torch.load('model.pth', map_location=device))
         model.eval()
     except Exception as e:
         st.error(f"Error loading LSTM model: {e}")
-        return None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None
     try:
         tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
         bert_model = BertModel.from_pretrained("bert-base-uncased").to(device)
         bert_model.eval()
     except Exception as e:
         st.error(f"Error loading BERT model: {e}")
-        return None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None
     if not os.path.exists('pca_model.pkl'):
         st.error("pca_model.pkl not found. Please upload the PCA model file to your Streamlit Cloud repository.")
-        return None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None
     try:
         with open('pca_model.pkl', 'rb') as f:
             pca = pickle.load(f)
     except Exception as e:
         st.error(f"Error loading PCA model: {e}")
-        return None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None
     analyzer = SentimentIntensityAnalyzer()
-    sentence_model = SentenceTransformer("paraphrase-MiniLM-L6-v2")
-    try:
-        absa_model_name = "yangheng/deberta-v3-base-absa-v1.1"
-        absa_tokenizer = AutoTokenizer.from_pretrained(absa_model_name)
-        absa_model = AutoModelForSequenceClassification.from_pretrained(absa_model_name)
-        absa_classifier = pipeline("text-classification", model=absa_model, tokenizer=absa_tokenizer)
-    except Exception as e:
-        st.error(f"Error loading ABSA classifier: {e}")
-        absa_classifier = None
-    return model, tokenizer, bert_model, pca, analyzer, device, sentence_model, absa_classifier
+    return model, tokenizer, bert_model, pca, analyzer, device
 
 def preprocess_sentence(sentence, tokenizer, bert_model, device):
     tokens = tokenizer(
@@ -134,137 +120,6 @@ def get_word_sentiments(text, analyzer):
             word_sentiments[word] = score
     return word_sentiments
 
-def load_language_model(text):
-    lang = detect(text)
-    model_name = f"{lang}_core_web_sm" if lang != "en" else "en_core_web_sm"
-    try:
-        return spacy.load(model_name)
-    except OSError:
-        st.warning(f"Language model '{model_name}' not found. Falling back to 'en_core_web_sm'.")
-        try:
-            return spacy.load("en_core_web_sm")
-        except OSError:
-            st.error("Default model 'en_core_web_sm' not found. Please ensure it’s installed.")
-            return None
-
-STOPWORDS = {
-    "the", "a", "an", "is", "was", "were", "it", "this", "that", "of", "to",
-    "for", "on", "with", "as", "by", "at", "in", "and", "but", "or"
-}
-
-def predict_aspects(text, previous_aspects=None):
-    nlp = load_language_model(text)
-    if nlp is None:
-        st.warning("No language model available. Cannot extract aspects.")
-        return []
-    try:
-        doc = nlp(text)
-    except Exception as e:
-        st.error(f"Error processing text: {e}")
-        return []
-    aspects = []
-    previous_aspects = previous_aspects or []
-    for chunk in doc.noun_chunks:
-        aspect_tokens = [
-            token.text for token in chunk
-            if token.text.lower() not in STOPWORDS
-            and token.pos_ in ["NOUN", "PROPN"]
-            and token.dep_ not in ["det", "poss", "prep", "pron"]
-        ]
-        aspect = " ".join(aspect_tokens).strip()
-        if aspect:
-            aspects.append(aspect)
-    if "it" in [token.text.lower() for token in doc] and previous_aspects and not aspects:
-        aspects.append(previous_aspects[-1])
-    if not aspects:
-        for token in doc:
-            if (token.text.lower() not in STOPWORDS and
-                token.pos_ in ["NOUN", "PROPN"] and
-                token.dep_ not in ["det", "poss", "prep", "pron"]):
-                aspects.append(token.text)
-    aspects = sorted(list(set(aspects)))
-    return merge_similar_aspects(aspects)
-
-def merge_similar_aspects(aspects, sentence_model, threshold=0.9):
-    if len(aspects) <= 1:
-        return aspects
-    aspect_vectors = sentence_model.encode(aspects)
-    merged_aspects = []
-    used_indices = set()
-    for i, aspect1 in enumerate(aspects):
-        if i in used_indices:
-            continue
-        merged_aspects.append(aspect1)
-        for j, aspect2 in enumerate(aspects):
-            if i != j and j not in used_indices:
-                similarity = cosine_similarity(
-                    [aspect_vectors[i]], [aspect_vectors[j]]
-                )[0][0]
-                if similarity > threshold:
-                    used_indices.add(j)
-        used_indices.add(i)
-    return merged_aspects
-
-def classify_sentiment_absa(text, aspect_terms, absa_classifier):
-    aspect_sentiments = []
-    if absa_classifier is None:
-        st.warning("ABSA classifier not loaded. Aspect sentiments will be marked as 'neutral'.")
-        for aspect in aspect_terms:
-            aspect_sentiments.append((aspect, "neutral", 0.0, text))
-        return aspect_sentiments
-    for aspect in aspect_terms:
-        input_text = f"{text}. Aspect: {aspect}"
-        result = absa_classifier(input_text)
-        sentiment = result[0]["label"].lower() if result else "neutral"
-        confidence = round(result[0]["score"], 4) if result else 0.0
-        aspect_sentiments.append((aspect, sentiment, confidence, text))
-    return aspect_sentiments
-
-def split_sentences(text):
-    nlp = load_language_model(text)
-    if nlp is None:
-        st.warning("No language model available. Treating the entire text as one sentence.")
-        return [text.strip()]
-    try:
-        doc = nlp(text)
-    except Exception as e:
-        st.error(f"Error processing text: {e}")
-        return [text.strip()]
-    sentences = [sent.text.strip() for sent in doc.sents]
-    final_sentences = []
-    for sent in sentences:
-        if " but " in sent:
-            parts = sent.split(" but ")
-            final_sentences.extend(parts)
-        elif ",but " in sent:
-            parts = sent.split(",but ")
-            final_sentences.extend(parts)
-        elif " and also " in sent:
-            parts = sent.split(" and also ")
-            final_sentences.extend(parts)
-        else:
-            final_sentences.append(sent)
-    return [s.strip() for s in final_sentences if s.strip()]
-
-def get_aspect_sentiments(text, sentence_model, absa_classifier):
-    clauses = split_sentences(text)
-    aspect_sentiment_dict = {}
-    previous_aspects = []
-    for clause in clauses:
-        aspect_terms = predict_aspects(clause, previous_aspects)
-        if aspect_terms:
-            sentiments = classify_sentiment_absa(clause, aspect_terms, absa_classifier)
-            for aspect, sentiment, confidence, clause_text in sentiments:
-                if aspect not in aspect_sentiment_dict:
-                    aspect_sentiment_dict[aspect] = []
-                aspect_sentiment_dict[aspect].append((sentiment, confidence, clause_text))
-            previous_aspects = aspect_terms
-    aspect_sentiments = []
-    for aspect, sentiment_list in aspect_sentiment_dict.items():
-        for sentiment, confidence, clause_text in sentiment_list:
-            aspect_sentiments.append((aspect, sentiment, confidence, clause_text))
-    return aspect_sentiments
-
 def plot_sentiment_bar(word_sentiments):
     if not word_sentiments:
         return None
@@ -302,27 +157,9 @@ def plot_overall_sentiment(sentiments):
     )
     return fig
 
-def plot_aspect_sentiments(aspect_sentiments):
-    if not aspect_sentiments:
-        return None
-    df = pd.DataFrame(aspect_sentiments, columns=['Aspect', 'Sentiment', 'Confidence', 'Clause'])
-    fig = px.bar(
-        df,
-        x='Aspect',
-        y='Confidence',
-        color='Sentiment',
-        color_discrete_map={'positive': 'green', 'negative': 'red', 'neutral': 'blue'},
-        title='Aspect-Based Sentiment Analysis',
-        hover_data=['Clause'],
-        text=df['Sentiment']
-    )
-    fig.update_traces(textposition='auto')
-    fig.update_layout(barmode='group')
-    return fig
-
 def main():
     st.title("Sentiment Analysis Application")
-    model, tokenizer, bert_model, pca, analyzer, device, sentence_model, absa_classifier = load_models()
+    model, tokenizer, bert_model, pca, analyzer, device = load_models()
     if model is None:
         st.error("Required models could not be loaded. Please check the error messages above.")
         return
@@ -344,9 +181,6 @@ def main():
                 if word_sentiments:
                     st.plotly_chart(plot_sentiment_bar(word_sentiments))
                     st.pyplot(generate_wordcloud(word_sentiments))
-                aspect_sentiments = get_aspect_sentiments(user_input, sentence_model, absa_classifier)
-                if aspect_sentiments:
-                    st.plotly_chart(plot_aspect_sentiments(aspect_sentiments))
 
     with tab2:
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
@@ -355,16 +189,10 @@ def main():
             review_column = st.selectbox("Select the column containing reviews:", df.columns)
             if st.button("Analyze CSV", key="csv_analyze"):
                 sentiments = []
-                all_aspect_sentiments = []
                 for i, review in enumerate(df[review_column]):
                     sentiment = predict_sentence(review, model, tokenizer, bert_model, pca, analyzer, device)
                     sentiments.append(sentiment)
-                    aspect_sentiments = get_aspect_sentiments(str(review), sentence_model, absa_classifier)
-                    all_aspect_sentiments.extend(aspect_sentiments)
                 df['Predicted_Sentiment'] = sentiments
-                if all_aspect_sentiments:
-                    aspect_df = pd.DataFrame(all_aspect_sentiments, columns=['Aspect', 'Sentiment', 'Confidence', 'Clause'])
-                    df = pd.concat([df, aspect_df], axis=1)
                 csv = df.to_csv(index=False, encoding='utf-8')
                 st.download_button(
                     label="Download results as CSV",
@@ -374,9 +202,6 @@ def main():
                 )
                 overall_fig = plot_overall_sentiment(df['Predicted_Sentiment'])
                 st.plotly_chart(overall_fig)
-                if all_aspect_sentiments:
-                    aspect_fig = plot_aspect_sentiments(all_aspect_sentiments)
-                    st.plotly_chart(aspect_fig)
 
 if __name__ == "__main__":
     main()
