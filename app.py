@@ -98,7 +98,7 @@ def preprocess_sentence(sentence, tokenizer, bert_model, device):
 
 def predict_sentence(sentence, model, tokenizer, bert_model, pca, analyzer, device):
     try:
-        cls_embeddings = preprocess_sentence(str(sentence), tokenizer, bert_model, device)  # Convert to string to handle NaN
+        cls_embeddings = preprocess_sentence(str(sentence), tokenizer, bert_model, device)
         cls_embeddings_np = cls_embeddings.cpu().numpy()
         pca_embeddings = pca.transform(cls_embeddings_np)
         vader_score = analyzer.polarity_scores(str(sentence))['compound']
@@ -224,10 +224,21 @@ def main():
             
             if st.button("Analyze CSV", key="csv_analyze"):
                 with st.spinner("Analyzing reviews..."):
-                    # Predict sentiments
-                    df['Predicted_Sentiment'] = df[review_column].apply(
-                        lambda x: predict_sentence(x, model, tokenizer, bert_model, pca, analyzer, device)
-                    )
+                    # Initialize progress bar
+                    progress_bar = st.progress(0)
+                    total_rows = len(df)
+                    sentiments = []
+
+                    # Predict sentiments with progress update
+                    for i, review in enumerate(df[review_column]):
+                        sentiment = predict_sentence(review, model, tokenizer, bert_model, pca, analyzer, device)
+                        sentiments.append(sentiment)
+                        # Update progress bar
+                        progress = (i + 1) / total_rows
+                        progress_bar.progress(progress)
+
+                    # Add predictions to dataframe
+                    df['Predicted_Sentiment'] = sentiments
                     
                     # Display results
                     st.write("Analysis complete! Here's the updated dataframe:")
