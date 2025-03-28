@@ -1,38 +1,59 @@
+# app.py
+import streamlit as st
 import torch
 import torch.nn as nn
-import streamlit as st
 from transformers import BertTokenizer, BertModel
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import numpy as np
 import pickle
+from sklearn.decomposition import PCA
 import plotly.express as px
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+import nltk
+from nltk.tokenize import word_tokenize
 import pandas as pd
-import os
-import gc
+from io import StringIO
 
-# Define the LSTM Classifier
+# Download NLTK data
+try:
+    nltk.download('punkt', quiet=True)
+    nltk.download('punkt_tab', quiet=True)
+except Exception as e:
+    st.error(f"Error downloading NLTK data: {e}")
+
+# LSTMClassifier class (unchanged)
 class LSTMClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, num_classes):
+    def __init__(self, input_size, hidden_size, num_classes, num_layers=2, dropout=0.3, bidirectional=True):
         super(LSTMClassifier, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
-        self.fc = nn.Linear(hidden_size, num_classes)
-        self.softmax = nn.Softmax(dim=1)
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bidirectional = bidirectional
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=bidirectional, dropout=dropout)
+        num_directions = 2 if bidirectional else 1
+        self.fc = nn.Linear(hidden_size * num_directions, num_classes)
+        self.dropout = nn.Dropout(dropout)
+        self.batch_norm = nn.BatchNorm1d(hidden_size * num_directions)
 
     def forward(self, x):
-        lstm_out, (h_n, c_n) = self.lstm(x)
-        out = self.fc(lstm_out[:, -1, :])  # Use the last hidden state
-        out = self.softmax(out)  # Output probabilities for each class
+        batch_size = x.size(0)
+        h0 = torch.zeros(self.num_layers * (2 if self.bidirectional else 1), batch_size, self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers * (2 if self.bidirectional else 1), batch_size, self.hidden_size).to(x.device)
+        lstm_out, (hidden, _) = self.lstm(x, (h0, c0))
+        if self.bidirectional:
+            hidden = torch.cat((hidden[-2], hidden[-1]), dim=1)
+        else:
+            hidden = hidden[-1]
+        out = self.batch_norm(hidden)
+        out = self.dropout(out)
+        out = self.fc(out)
         return out
 
-# Load models function
+# Initialize models and components
 @st.cache_resource
 def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Load LSTM model
-    if not os.path.exists('model.pth'):
-        st.error("model.pth not found. Please upload the LSTM model file to your Streamlit Cloud repository.")
-        return None, None, None, None, None, None
     try:
         model = LSTMClassifier(input_size=257, hidden_size=512, num_classes=3).to(device)
         model.load_state_dict(torch.load('model.pth', map_location=device))
@@ -41,7 +62,6 @@ def load_models():
         st.error(f"Error loading LSTM model: {e}")
         return None, None, None, None, None, None
     
-    # Load BERT tokenizer and model
     try:
         tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
         bert_model = BertModel.from_pretrained("bert-base-uncased").to(device)
@@ -50,10 +70,6 @@ def load_models():
         st.error(f"Error loading BERT model: {e}")
         return None, None, None, None, None, None
     
-    # Load PCA model
-    if not os.path.exists('pca_model.pkl'):
-        st.error("pca_model.pkl not found. Please upload the PCA model file to your Streamlit Cloud repository.")
-        return None, None, None, None, None, None
     try:
         with open('pca_model.pkl', 'rb') as f:
             pca = pickle.load(f)
@@ -61,69 +77,174 @@ def load_models():
         st.error(f"Error loading PCA model: {e}")
         return None, None, None, None, None, None
     
-    # Sentiment analyzer (VADER)
     analyzer = SentimentIntensityAnalyzer()
     
     return model, tokenizer, bert_model, pca, analyzer, device
 
-# Function for sentiment classification
-def predict_sentiment(model, tokenizer, bert_model, pca, analyzer, device, text):
-    # Tokenize and process text for BERT
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512).to(device)
+# Preprocessing and prediction functions
+def preprocess_sentence(sentence, tokenizer, bert_model, device):
+    tokens = tokenizer(
+        [sentence],
+        max_length=512,
+        padding="max_length",
+        truncation=True,
+        return_tensors="pt"
+    ).to(device)
+
     with torch.no_grad():
-        outputs = bert_model(**inputs)
-        sentence_embedding = outputs.last_hidden_state.mean(dim=1)  # Take the mean of the hidden states
+        outputs = bert_model(**tokens)
+        cls_embeddings = outputs.last_hidden_state[:, 0, :]
+    return cls_embeddings
 
-    # Apply PCA transformation on BERT sentence embedding
-    sentence_embedding_pca = pca.transform(sentence_embedding.cpu().numpy())
+def predict_sentence(sentence, model, tokenizer, bert_model, pca, analyzer, device):
+    try:
+        cls_embeddings = preprocess_sentence(str(sentence), tokenizer, bert_model, device)  # Convert to string to handle NaN
+        cls_embeddings_np = cls_embeddings.cpu().numpy()
+        pca_embeddings = pca.transform(cls_embeddings_np)
+        vader_score = analyzer.polarity_scores(str(sentence))['compound']
+        sentence_features = np.concatenate([[vader_score], pca_embeddings[0]])
+        sentence_features_tensor = torch.tensor(sentence_features, dtype=torch.float32).unsqueeze(0).unsqueeze(1).to(device)
+        with torch.no_grad():
+            outputs = model(sentence_features_tensor)
+            _, predicted = torch.max(outputs.data, 1)
+        sentiment_label = predicted.item()
+        sentiment = ['Negative', 'Neutral', 'Positive'][sentiment_label]
+        return sentiment
+    except Exception as e:
+        st.error(f"Prediction error for '{sentence}': {e}")
+        return "Error"
 
-    # Convert PCA embedding to tensor
-    sentence_embedding_tensor = torch.tensor(sentence_embedding_pca).to(device)
+# Word-level sentiment analysis
+def get_word_sentiments(text, analyzer):
+    words = word_tokenize(text.lower())
+    word_sentiments = {}
+    for word in words:
+        score = analyzer.polarity_scores(word)['compound']
+        if score != 0:
+            word_sentiments[word] = score
+    return word_sentiments
 
-    # Get sentiment prediction from LSTM model
-    with torch.no_grad():
-        prediction = model(sentence_embedding_tensor)
-    sentiment = prediction.argmax(dim=1).item()
+# Visualization functions
+def plot_sentiment_bar(word_sentiments):
+    if not word_sentiments:
+        return None
+    words = list(word_sentiments.keys())
+    scores = list(word_sentiments.values())
+    colors = ['red' if s < 0 else 'green' for s in scores]
+    
+    fig = px.bar(
+        x=words,
+        y=scores,
+        color=colors,
+        color_discrete_map={'red': 'red', 'green': 'green'},
+        labels={'x': 'Words', 'y': 'Sentiment Score'},
+        title='Word-Level Sentiment Distribution'
+    )
+    fig.update_layout(showlegend=False)
+    return fig
 
-    # Use VADER for additional sentiment analysis (optional)
-    vader_score = analyzer.polarity_scores(text)
-    return sentiment, vader_score
+def generate_wordcloud(word_sentiments):
+    if not word_sentiments:
+        return None
+    wc = WordCloud(width=800, height=400, background_color='white').generate_from_frequencies(word_sentiments)
+    fig, ax = plt.subplots()
+    ax.imshow(wc, interpolation='bilinear')
+    ax.axis('off')
+    return fig
 
-# Streamlit UI
+def plot_overall_sentiment(sentiments):
+    sentiment_counts = pd.Series(sentiments).value_counts()
+    fig = px.pie(
+        values=sentiment_counts.values,
+        names=sentiment_counts.index,
+        title='Overall Sentiment Distribution',
+        color=sentiment_counts.index,
+        color_discrete_map={'Positive': 'green', 'Negative': 'red', 'Neutral': 'blue', 'Error': 'gray'}
+    )
+    return fig
+
+# Streamlit interface
 def main():
-    st.title("Sentiment Analysis with LSTM and BERT")
+    st.title("Sentiment Analysis Application")
     
     # Load models
     model, tokenizer, bert_model, pca, analyzer, device = load_models()
+    
     if model is None:
         return
-    
-    # Text input for sentiment analysis
-    user_input = st.text_area("Enter text for sentiment analysis:")
-    
-    if st.button("Analyze Sentiment"):
-        if user_input:
-            sentiment, vader_score = predict_sentiment(model, tokenizer, bert_model, pca, analyzer, device, user_input)
-            
-            # Display sentiment result
-            if sentiment == 0:
-                sentiment_label = "Negative"
-            elif sentiment == 1:
-                sentiment_label = "Neutral"
-            else:
-                sentiment_label = "Positive"
-            
-            st.write(f"Sentiment: {sentiment_label}")
-            st.write(f"VADER Sentiment Score: {vader_score}")
-            
-            # Optionally plot sentiment analysis result
-            sentiment_data = {'Sentiment': ['Negative', 'Neutral', 'Positive'], 'Score': [vader_score['neg'], vader_score['neu'], vader_score['pos']]}
-            df = pd.DataFrame(sentiment_data)
-            fig = px.bar(df, x='Sentiment', y='Score', title='Sentiment Analysis')
-            st.plotly_chart(fig)
-        else:
-            st.error("Please enter some text.")
 
-# Run the Streamlit app
+    # Create tabs
+    tab1, tab2 = st.tabs(["Single Text Analysis", "CSV File Analysis"])
+
+    # Tab 1: Single Text Analysis
+    with tab1:
+        st.write("Enter a sentence to analyze its sentiment and see word-level insights")
+        user_input = st.text_area("Enter your text here:", height=150)
+        
+        if st.button("Analyze Sentiment", key="single_analyze"):
+            if user_input:
+                with st.spinner("Analyzing..."):
+                    sentiment = predict_sentence(user_input, model, tokenizer, bert_model, pca, analyzer, device)
+                    if sentiment:
+                        if sentiment == "Positive":
+                            st.success(f"Overall Sentiment: {sentiment} 😊")
+                        elif sentiment == "Negative":
+                            st.error(f"Overall Sentiment: {sentiment} 😔")
+                        else:
+                            st.info(f"Overall Sentiment: {sentiment} 😐")
+
+                        word_sentiments = get_word_sentiments(user_input, analyzer)
+                        
+                        bar_fig = plot_sentiment_bar(word_sentiments)
+                        if bar_fig:
+                            st.plotly_chart(bar_fig)
+                        else:
+                            st.info("No significant word-level sentiments detected for bar chart.")
+
+                        wc_fig = generate_wordcloud(word_sentiments)
+                        if wc_fig:
+                            st.pyplot(wc_fig)
+                        else:
+                            st.info("No significant word-level sentiments detected for word cloud.")
+            else:
+                st.warning("Please enter some text to analyze!")
+
+    # Tab 2: CSV File Analysis
+    with tab2:
+        st.write("Upload a CSV file with reviews to analyze sentiments")
+        uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+        
+        if uploaded_file is not None:
+            df = pd.read_csv(uploaded_file)
+            st.write("Preview of uploaded file:")
+            st.dataframe(df.head())
+
+            # Column selection
+            review_column = st.selectbox("Select the column containing reviews:", df.columns)
+            
+            if st.button("Analyze CSV", key="csv_analyze"):
+                with st.spinner("Analyzing reviews..."):
+                    # Predict sentiments
+                    df['Predicted_Sentiment'] = df[review_column].apply(
+                        lambda x: predict_sentence(x, model, tokenizer, bert_model, pca, analyzer, device)
+                    )
+                    
+                    # Display results
+                    st.write("Analysis complete! Here's the updated dataframe:")
+                    st.dataframe(df)
+
+                    # Generate and offer CSV download
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="Download results as CSV",
+                        data=csv,
+                        file_name="sentiment_analysis_results.csv",
+                        mime="text/csv"
+                    )
+
+                    # Plot overall sentiment distribution
+                    overall_fig = plot_overall_sentiment(df['Predicted_Sentiment'])
+                    st.plotly_chart(overall_fig)
+
 if __name__ == "__main__":
     main()
