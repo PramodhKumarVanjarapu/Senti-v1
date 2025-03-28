@@ -79,6 +79,7 @@ def load_models():
     
     analyzer = SentimentIntensityAnalyzer()
     
+    st.write("Models loaded successfully!")  # Debug message
     return model, tokenizer, bert_model, pca, analyzer, device
 
 # Preprocessing and prediction functions
@@ -215,7 +216,18 @@ def main():
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
         
         if uploaded_file is not None:
-            df = pd.read_csv(uploaded_file)
+            try:
+                # Attempt to read with UTF-8 first
+                df = pd.read_csv(uploaded_file, encoding='utf-8')
+            except UnicodeDecodeError:
+                # Fallback to ISO-8859-1 if UTF-8 fails
+                st.warning("UTF-8 decoding failed. Trying ISO-8859-1 encoding...")
+                uploaded_file.seek(0)  # Reset file pointer
+                df = pd.read_csv(uploaded_file, encoding='iso-8859-1')
+            except Exception as e:
+                st.error(f"Error reading CSV file: {e}")
+                return
+
             st.write("Preview of uploaded file:")
             st.dataframe(df.head())
 
@@ -244,8 +256,12 @@ def main():
                     st.write("Analysis complete! Here's the updated dataframe:")
                     st.dataframe(df)
 
-                    # Generate and offer CSV download
-                    csv = df.to_csv(index=False)
+                    # Generate and offer CSV download with only reviewText and Sentiment
+                    simplified_df = pd.DataFrame({
+                        'reviewText': df[review_column],
+                        'Sentiment': df['Predicted_Sentiment']
+                    })
+                    csv = simplified_df.to_csv(index=False)
                     st.download_button(
                         label="Download results as CSV",
                         data=csv,
