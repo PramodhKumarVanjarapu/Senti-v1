@@ -1,9 +1,8 @@
-streamlit==1.28.0
-torch==2.2.0
-transformers==4.36.0
+streamlit
+torch
+transformers
 vaderSentiment
 numpy
-pickle-mixin
 scikit-learn
 plotly
 wordcloud
@@ -13,4 +12,3 @@ pandas
 spacy
 sentence-transformers
 langdetect
-sentencepiece 
