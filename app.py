@@ -3,7 +3,7 @@ import streamlit as st
 import torch
 import torch.nn as nn
 from transformers import BertTokenizer, BertModel
-from vaderSentiment.vaderSentiment import Sentiment  # Added missing import
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # Corrected import
 import numpy as np
 import pickle
 from sklearn.decomposition import PCA
@@ -16,7 +16,7 @@ from nltk.tokenize import word_tokenize
 # Download NLTK data
 try:
     nltk.download('punkt', quiet=True)
-    nltk.download('punkt_tab', quiet=True)  # Added punkt_tab download
+    nltk.download('punkt_tab', quiet=True)
 except Exception as e:
     st.error(f"Error downloading NLTK data: {e}")
 
