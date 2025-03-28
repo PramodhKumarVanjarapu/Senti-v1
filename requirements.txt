@@ -10,3 +10,6 @@ wordcloud
 matplotlib
 nltk
 pandas
+spacy
+sentence-transformers
+langdetect
