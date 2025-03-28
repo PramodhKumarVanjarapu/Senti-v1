@@ -2,7 +2,7 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-from transformers import BertTokenizer, BertModel, pipeline  # Use BertTokenizer instead of BertTokenizerFast
+from transformers import BertTokenizer, BertModel, pipeline
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import numpy as np
 import pickle
