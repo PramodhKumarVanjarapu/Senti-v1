@@ -3,7 +3,7 @@ import streamlit as st
 import torch
 import torch.nn as nn
 from transformers import BertTokenizer, BertModel
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from vaderSentiment.vaderSentiment import Sentiment  # Added missing import
 import numpy as np
 import pickle
 from sklearn.decomposition import PCA
@@ -14,7 +14,11 @@ import nltk
 from nltk.tokenize import word_tokenize
 
 # Download NLTK data
-nltk.download('punkt', quiet=True)
+try:
+    nltk.download('punkt', quiet=True)
+    nltk.download('punkt_tab', quiet=True)  # Added punkt_tab download
+except Exception as e:
+    st.error(f"Error downloading NLTK data: {e}")
 
 # LSTMClassifier class (unchanged)
 class LSTMClassifier(nn.Module):
