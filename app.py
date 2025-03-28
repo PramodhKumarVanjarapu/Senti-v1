@@ -3,7 +3,7 @@ import streamlit as st
 import torch
 import torch.nn as nn
 from transformers import BertTokenizer, BertModel
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # Corrected import
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import numpy as np
 import pickle
 from sklearn.decomposition import PCA
@@ -12,6 +12,8 @@ from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import nltk
 from nltk.tokenize import word_tokenize
+import pandas as pd
+from io import StringIO
 
 # Download NLTK data
 try:
@@ -96,10 +98,10 @@ def preprocess_sentence(sentence, tokenizer, bert_model, device):
 
 def predict_sentence(sentence, model, tokenizer, bert_model, pca, analyzer, device):
     try:
-        cls_embeddings = preprocess_sentence(sentence, tokenizer, bert_model, device)
+        cls_embeddings = preprocess_sentence(str(sentence), tokenizer, bert_model, device)  # Convert to string to handle NaN
         cls_embeddings_np = cls_embeddings.cpu().numpy()
         pca_embeddings = pca.transform(cls_embeddings_np)
-        vader_score = analyzer.polarity_scores(sentence)['compound']
+        vader_score = analyzer.polarity_scores(str(sentence))['compound']
         sentence_features = np.concatenate([[vader_score], pca_embeddings[0]])
         sentence_features_tensor = torch.tensor(sentence_features, dtype=torch.float32).unsqueeze(0).unsqueeze(1).to(device)
         with torch.no_grad():
@@ -109,8 +111,8 @@ def predict_sentence(sentence, model, tokenizer, bert_model, pca, analyzer, devi
         sentiment = ['Negative', 'Neutral', 'Positive'][sentiment_label]
         return sentiment
     except Exception as e:
-        st.error(f"Prediction error: {e}")
-        return None
+        st.error(f"Prediction error for '{sentence}': {e}")
+        return "Error"
 
 # Word-level sentiment analysis
 def get_word_sentiments(text, analyzer):
@@ -118,7 +120,7 @@ def get_word_sentiments(text, analyzer):
     word_sentiments = {}
     for word in words:
         score = analyzer.polarity_scores(word)['compound']
-        if score != 0:  # Only include words with non-neutral sentiment
+        if score != 0:
             word_sentiments[word] = score
     return word_sentiments
 
@@ -150,51 +152,99 @@ def generate_wordcloud(word_sentiments):
     ax.axis('off')
     return fig
 
+def plot_overall_sentiment(sentiments):
+    sentiment_counts = pd.Series(sentiments).value_counts()
+    fig = px.pie(
+        values=sentiment_counts.values,
+        names=sentiment_counts.index,
+        title='Overall Sentiment Distribution',
+        color=sentiment_counts.index,
+        color_discrete_map={'Positive': 'green', 'Negative': 'red', 'Neutral': 'blue', 'Error': 'gray'}
+    )
+    return fig
+
 # Streamlit interface
 def main():
     st.title("Sentiment Analysis Application")
-    st.write("Enter a sentence to analyze its sentiment and see word-level insights")
-
+    
     # Load models
     model, tokenizer, bert_model, pca, analyzer, device = load_models()
     
     if model is None:
         return
 
-    # User input
-    user_input = st.text_area("Enter your text here:", height=150)
-    
-    if st.button("Analyze Sentiment"):
-        if user_input:
-            with st.spinner("Analyzing..."):
-                # Overall sentiment
-                sentiment = predict_sentence(user_input, model, tokenizer, bert_model, pca, analyzer, device)
-                if sentiment:
-                    if sentiment == "Positive":
-                        st.success(f"Overall Sentiment: {sentiment} 😊")
-                    elif sentiment == "Negative":
-                        st.error(f"Overall Sentiment: {sentiment} 😔")
-                    else:
-                        st.info(f"Overall Sentiment: {sentiment} 😐")
+    # Create tabs
+    tab1, tab2 = st.tabs(["Single Text Analysis", "CSV File Analysis"])
 
-                    # Word-level analysis
-                    word_sentiments = get_word_sentiments(user_input, analyzer)
+    # Tab 1: Single Text Analysis
+    with tab1:
+        st.write("Enter a sentence to analyze its sentiment and see word-level insights")
+        user_input = st.text_area("Enter your text here:", height=150)
+        
+        if st.button("Analyze Sentiment", key="single_analyze"):
+            if user_input:
+                with st.spinner("Analyzing..."):
+                    sentiment = predict_sentence(user_input, model, tokenizer, bert_model, pca, analyzer, device)
+                    if sentiment:
+                        if sentiment == "Positive":
+                            st.success(f"Overall Sentiment: {sentiment} 😊")
+                        elif sentiment == "Negative":
+                            st.error(f"Overall Sentiment: {sentiment} 😔")
+                        else:
+                            st.info(f"Overall Sentiment: {sentiment} 😐")
+
+                        word_sentiments = get_word_sentiments(user_input, analyzer)
+                        
+                        bar_fig = plot_sentiment_bar(word_sentiments)
+                        if bar_fig:
+                            st.plotly_chart(bar_fig)
+                        else:
+                            st.info("No significant word-level sentiments detected for bar chart.")
+
+                        wc_fig = generate_wordcloud(word_sentiments)
+                        if wc_fig:
+                            st.pyplot(wc_fig)
+                        else:
+                            st.info("No significant word-level sentiments detected for word cloud.")
+            else:
+                st.warning("Please enter some text to analyze!")
+
+    # Tab 2: CSV File Analysis
+    with tab2:
+        st.write("Upload a CSV file with reviews to analyze sentiments")
+        uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+        
+        if uploaded_file is not None:
+            df = pd.read_csv(uploaded_file)
+            st.write("Preview of uploaded file:")
+            st.dataframe(df.head())
+
+            # Column selection
+            review_column = st.selectbox("Select the column containing reviews:", df.columns)
+            
+            if st.button("Analyze CSV", key="csv_analyze"):
+                with st.spinner("Analyzing reviews..."):
+                    # Predict sentiments
+                    df['Predicted_Sentiment'] = df[review_column].apply(
+                        lambda x: predict_sentence(x, model, tokenizer, bert_model, pca, analyzer, device)
+                    )
                     
-                    # Bar chart
-                    bar_fig = plot_sentiment_bar(word_sentiments)
-                    if bar_fig:
-                        st.plotly_chart(bar_fig)
-                    else:
-                        st.info("No significant word-level sentiments detected for bar chart.")
+                    # Display results
+                    st.write("Analysis complete! Here's the updated dataframe:")
+                    st.dataframe(df)
 
-                    # Word cloud
-                    wc_fig = generate_wordcloud(word_sentiments)
-                    if wc_fig:
-                        st.pyplot(wc_fig)
-                    else:
-                        st.info("No significant word-level sentiments detected for word cloud.")
-        else:
-            st.warning("Please enter some text to analyze!")
+                    # Generate and offer CSV download
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="Download results as CSV",
+                        data=csv,
+                        file_name="sentiment_analysis_results.csv",
+                        mime="text/csv"
+                    )
+
+                    # Plot overall sentiment distribution
+                    overall_fig = plot_overall_sentiment(df['Predicted_Sentiment'])
+                    st.plotly_chart(overall_fig)
 
 if __name__ == "__main__":
     main()
