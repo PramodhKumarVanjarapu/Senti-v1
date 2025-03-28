@@ -2,7 +2,7 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-from transformers import BertTokenizer, BertModel, pipeline
+from transformers import BertTokenizer, BertModel, pipeline  # Use BertTokenizer instead of BertTokenizerFast
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import numpy as np
 import pickle
@@ -85,6 +85,8 @@ def load_models():
     analyzer = SentimentIntensityAnalyzer()
     sentence_model = SentenceTransformer("paraphrase-MiniLM-L6-v2")
     absa_classifier = pipeline("text-classification", model="yangheng/deberta-v3-base-absa-v1.1")
+    
+    st.write("Models loaded successfully!")  # Debug message
     
     return model, tokenizer, bert_model, pca, analyzer, device, sentence_model, absa_classifier
 
