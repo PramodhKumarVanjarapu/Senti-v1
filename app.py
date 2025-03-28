@@ -19,24 +19,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 from langdetect import detect
 import os
 import gc
-import spacy.cli  # For downloading Spacy models programmatically
 
 try:
     nltk.download('punkt', quiet=True)
 except Exception as e:
     st.error(f"Error downloading NLTK data: {e}")
-
-# Download Spacy model on startup if not present
-def ensure_spacy_model(model_name="en_core_web_sm"):
-    try:
-        spacy.load(model_name)
-    except OSError:
-        st.info(f"Downloading Spacy model '{model_name}'...")
-        spacy.cli.download(model_name)
-        st.info(f"Model '{model_name}' downloaded successfully.")
-
-# Call this at the start of the app
-ensure_spacy_model("en_core_web_sm")
 
 class LSTMClassifier(nn.Module):
     def __init__(self, input_size, hidden_size, num_classes, num_layers=2, dropout=0.3, bidirectional=True):
