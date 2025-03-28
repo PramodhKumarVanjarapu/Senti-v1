@@ -5,46 +5,12 @@ from transformers import BertTokenizer, BertModel
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import numpy as np
 import pickle
-from sklearn.decomposition import PCA
 import plotly.express as px
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
-import nltk
-from nltk.tokenize import word_tokenize
 import pandas as pd
 import os
 import gc
-
-try:
-    nltk.download('punkt', quiet=True)
-except Exception as e:
-    st.error(f"Error downloading NLTK data: {e}")
-
-class LSTMClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, num_classes, num_layers=2, dropout=0.3, bidirectional=True):
-        super(LSTMClassifier, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.bidirectional = bidirectional
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=bidirectional, dropout=dropout)
-        num_directions = 2 if bidirectional else 1
-        self.fc = nn.Linear(hidden_size * num_directions, num_classes)
-        self.dropout = nn.Dropout(dropout)
-        self.batch_norm = nn.BatchNorm1d(hidden_size * num_directions)
-
-    def forward(self, x):
-        batch_size = x.size(0)
-        h0 = torch.zeros(self.num_layers * (2 if self.bidirectional else 1), batch_size, self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers * (2 if self.bidirectional else 1), batch_size, self.hidden_size).to(x.device)
-        lstm_out, (hidden, _) = self.lstm(x, (h0, c0))
-        if self.bidirectional:
-            hidden = torch.cat((hidden[-2], hidden[-1]), dim=1)
-        else:
-            hidden = hidden[-1]
-        out = self.batch_norm(hidden)
-        out = self.dropout(out)
-        out = self.fc(out)
-        return out
 
 @st.cache_resource
 def load_models():
@@ -111,41 +77,6 @@ def predict_sentence(sentence, model, tokenizer, bert_model, pca, analyzer, devi
         st.error(f"Prediction error for '{sentence}': {e}")
         return "Error"
 
-def get_word_sentiments(text, analyzer):
-    words = word_tokenize(text.lower())
-    word_sentiments = {}
-    for word in words:
-        score = analyzer.polarity_scores(word)['compound']
-        if score != 0:
-            word_sentiments[word] = score
-    return word_sentiments
-
-def plot_sentiment_bar(word_sentiments):
-    if not word_sentiments:
-        return None
-    words = list(word_sentiments.keys())
-    scores = list(word_sentiments.values())
-    colors = ['red' if s < 0 else 'green' for s in scores]
-    fig = px.bar(
-        x=words,
-        y=scores,
-        color=colors,
-        color_discrete_map={'red': 'red', 'green': 'green'},
-        labels={'x': 'Words', 'y': 'Sentiment Score'},
-        title='Word-Level Sentiment Distribution'
-    )
-    fig.update_layout(showlegend=False)
-    return fig
-
-def generate_wordcloud(word_sentiments):
-    if not word_sentiments:
-        return None
-    wc = WordCloud(width=800, height=400, background_color='white').generate_from_frequencies(word_sentiments)
-    fig, ax = plt.subplots()
-    ax.imshow(wc, interpolation='bilinear')
-    ax.axis('off')
-    return fig
-
 def plot_overall_sentiment(sentiments):
     sentiment_counts = pd.Series(sentiments).value_counts()
     fig = px.pie(
@@ -177,10 +108,6 @@ def main():
                     st.error(f"Overall Sentiment: {sentiment} 😔")
                 else:
                     st.info(f"Overall Sentiment: {sentiment} 😐")
-                word_sentiments = get_word_sentiments(user_input, analyzer)
-                if word_sentiments:
-                    st.plotly_chart(plot_sentiment_bar(word_sentiments))
-                    st.pyplot(generate_wordcloud(word_sentiments))
 
     with tab2:
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
