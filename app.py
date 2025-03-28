@@ -2,7 +2,7 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-from transformers import BertTokenizer, BertModel
+from transformers import BertTokenizer, BertModel, pipeline
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import numpy as np
 import pickle
@@ -14,6 +14,11 @@ import nltk
 from nltk.tokenize import word_tokenize
 import pandas as pd
 from io import StringIO
+import spacy
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from langdetect import detect
+from functools import lru_cache
 
 # Download NLTK data
 try:
@@ -60,7 +65,7 @@ def load_models():
         model.eval()
     except Exception as e:
         st.error(f"Error loading LSTM model: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
     
     try:
         tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
@@ -68,18 +73,20 @@ def load_models():
         bert_model.eval()
     except Exception as e:
         st.error(f"Error loading BERT model: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
     
     try:
         with open('pca_model.pkl', 'rb') as f:
             pca = pickle.load(f)
     except Exception as e:
         st.error(f"Error loading PCA model: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
     
     analyzer = SentimentIntensityAnalyzer()
+    sentence_model = SentenceTransformer("paraphrase-MiniLM-L6-v2")
+    absa_classifier = pipeline("text-classification", model="yangheng/deberta-v3-base-absa-v1.1")
     
-    return model, tokenizer, bert_model, pca, analyzer, device
+    return model, tokenizer, bert_model, pca, analyzer, device, sentence_model, absa_classifier
 
 # Preprocessing and prediction functions
 def preprocess_sentence(sentence, tokenizer, bert_model, device):
@@ -124,6 +131,140 @@ def get_word_sentiments(text, analyzer):
             word_sentiments[word] = score
     return word_sentiments
 
+# ABSA Functions
+def load_language_model(text):
+    lang = detect(text)
+    model_name = f"{lang}_core_web_sm" if lang != "en" else "en_core_web_sm"
+    try:
+        return spacy.load(model_name)
+    except OSError:
+        return spacy.load("en_core_web_sm")
+
+STOPWORDS = {
+    "the", "a", "an", "is", "was", "were", "it", "this", "that", "of", "to",
+    "for", "on", "with", "as", "by", "at", "in", "and", "but", "or"
+}
+
+def predict_aspects(text, previous_aspects=None):
+    nlp = load_language_model(text)
+    doc = nlp(text)
+    aspects = []
+    previous_aspects = previous_aspects or []
+
+    for chunk in doc.noun_chunks:
+        if "and" in chunk.text.lower() and "also" not in chunk.text.lower():
+            sub_chunks = [c.strip() for c in chunk.text.split(" and ")]
+            for sub_chunk in sub_chunks:
+                sub_doc = nlp(sub_chunk)
+                aspect_tokens = [
+                    token.text for token in sub_doc
+                    if token.text.lower() not in STOPWORDS
+                    and token.pos_ in ["NOUN", "PROPN"]
+                    and token.dep_ not in ["det", "poss", "prep", "pron"]
+                ]
+                aspect = " ".join(aspect_tokens).strip()
+                if aspect:
+                    aspects.append(aspect)
+        else:
+            aspect_tokens = [
+                token.text for token in chunk
+                if token.text.lower() not in STOPWORDS
+                and token.pos_ in ["NOUN", "PROPN"]
+                and token.dep_ not in ["det", "poss", "prep", "pron"]
+            ]
+            aspect = " ".join(aspect_tokens).strip()
+            if aspect:
+                aspects.append(aspect)
+
+    if "it" in [token.text.lower() for token in doc] and previous_aspects and not aspects:
+        aspects.append(previous_aspects[-1])
+
+    if not aspects:
+        for token in doc:
+            if (token.text.lower() not in STOPWORDS and
+                token.pos_ in ["NOUN", "PROPN"] and
+                token.dep_ not in ["det", "poss", "prep", "pron"]):
+                aspects.append(token.text)
+
+    aspects = sorted(list(set(aspects)))
+    return merge_similar_aspects(aspects)
+
+def merge_similar_aspects(aspects, sentence_model, threshold=0.9):
+    if len(aspects) <= 1:
+        return aspects
+
+    aspect_vectors = sentence_model.encode(aspects)
+    merged_aspects = []
+    used_indices = set()
+
+    for i, aspect1 in enumerate(aspects):
+        if i in used_indices:
+            continue
+        merged_aspects.append(aspect1)
+        for j, aspect2 in enumerate(aspects):
+            if i != j and j not in used_indices:
+                similarity = cosine_similarity(
+                    [aspect_vectors[i]], [aspect_vectors[j]]
+                )[0][0]
+                if similarity > threshold:
+                    used_indices.add(j)
+        used_indices.add(i)
+
+    return merged_aspects
+
+def classify_sentiment_absa(text, aspect_terms, absa_classifier):
+    aspect_sentiments = []
+    for aspect in aspect_terms:
+        input_text = f"[CLS] {text} [SEP] {aspect} [SEP]"
+        result = absa_classifier(input_text)
+        sentiment = result[0]["label"].lower() if result else "neutral"
+        confidence = round(result[0]["score"], 4) if result else 0.0
+        aspect_sentiments.append((aspect, sentiment, confidence, text))
+    return aspect_sentiments
+
+def split_sentences(text):
+    nlp = load_language_model(text)
+    doc = nlp(text)
+    sentences = [sent.text.strip() for sent in doc.sents]
+
+    final_sentences = []
+    for sent in sentences:
+        if " but " in sent:
+            parts = sent.split(" but ")
+            final_sentences.extend(parts)
+        elif ",but " in sent:
+            parts = sent.split(",but ")
+            final_sentences.extend(parts)
+        elif " and also " in sent:
+            parts = sent.split(" and also ")
+            final_sentences.extend(parts)
+        else:
+            final_sentences.append(sent)
+
+    return [s.strip() for s in final_sentences if s.strip()]
+
+def get_aspect_sentiments(text, sentence_model, absa_classifier):
+    clauses = split_sentences(text)
+    aspect_sentiment_dict = {}
+    previous_aspects = []
+
+    for clause in clauses:
+        aspect_terms = predict_aspects(clause, previous_aspects)
+        if aspect_terms:
+            sentiments = classify_sentiment_absa(clause, aspect_terms, absa_classifier)
+            for aspect, sentiment, confidence, clause_text in sentiments:
+                if aspect not in aspect_sentiment_dict:
+                    aspect_sentiment_dict[aspect] = []
+                aspect_sentiment_dict[aspect].append((sentiment, confidence, clause_text))
+            previous_aspects = aspect_terms
+
+    aspect_sentiments = []
+    for aspect, sentiment_list in aspect_sentiment_dict.items():
+        for sentiment, confidence, clause_text in sentiment_list:
+            aspect_sentiments.append((aspect, sentiment, confidence, clause_text))
+
+    return aspect_sentiments
+
 # Visualization functions
 def plot_sentiment_bar(word_sentiments):
     if not word_sentiments:
@@ -163,12 +304,30 @@ def plot_overall_sentiment(sentiments):
     )
     return fig
 
+def plot_aspect_sentiments(aspect_sentiments):
+    if not aspect_sentiments:
+        return None
+    df = pd.DataFrame(aspect_sentiments, columns=['Aspect', 'Sentiment', 'Confidence', 'Clause'])
+    fig = px.bar(
+        df,
+        x='Aspect',
+        y='Confidence',
+        color='Sentiment',
+        color_discrete_map={'positive': 'green', 'negative': 'red', 'neutral': 'blue'},
+        title='Aspect-Based Sentiment Analysis',
+        hover_data=['Clause'],
+        text=df['Sentiment']
+    )
+    fig.update_traces(textposition='auto')
+    fig.update_layout(barmode='group')
+    return fig
+
 # Streamlit interface
 def main():
     st.title("Sentiment Analysis Application")
     
     # Load models
-    model, tokenizer, bert_model, pca, analyzer, device = load_models()
+    model, tokenizer, bert_model, pca, analyzer, device, sentence_model, absa_classifier = load_models()
     
     if model is None:
         return
@@ -178,12 +337,13 @@ def main():
 
     # Tab 1: Single Text Analysis
     with tab1:
-        st.write("Enter a sentence to analyze its sentiment and see word-level insights")
+        st.write("Enter a sentence to analyze its sentiment, word-level insights, and aspect-based sentiments")
         user_input = st.text_area("Enter your text here:", height=150)
         
         if st.button("Analyze Sentiment", key="single_analyze"):
             if user_input:
                 with st.spinner("Analyzing..."):
+                    # Overall sentiment
                     sentiment = predict_sentence(user_input, model, tokenizer, bert_model, pca, analyzer, device)
                     if sentiment:
                         if sentiment == "Positive":
@@ -193,25 +353,37 @@ def main():
                         else:
                             st.info(f"Overall Sentiment: {sentiment} 😐")
 
-                        word_sentiments = get_word_sentiments(user_input, analyzer)
-                        
-                        bar_fig = plot_sentiment_bar(word_sentiments)
-                        if bar_fig:
-                            st.plotly_chart(bar_fig)
-                        else:
-                            st.info("No significant word-level sentiments detected for bar chart.")
+                    # Word-level analysis
+                    word_sentiments = get_word_sentiments(user_input, analyzer)
+                    bar_fig = plot_sentiment_bar(word_sentiments)
+                    if bar_fig:
+                        st.plotly_chart(bar_fig)
+                    else:
+                        st.info("No significant word-level sentiments detected for bar chart.")
 
-                        wc_fig = generate_wordcloud(word_sentiments)
-                        if wc_fig:
-                            st.pyplot(wc_fig)
-                        else:
-                            st.info("No significant word-level sentiments detected for word cloud.")
+                    wc_fig = generate_wordcloud(word_sentiments)
+                    if wc_fig:
+                        st.pyplot(wc_fig)
+                    else:
+                        st.info("No significant word-level sentiments detected for word cloud.")
+
+                    # Aspect-based sentiment analysis
+                    aspect_sentiments = get_aspect_sentiments(user_input, sentence_model, absa_classifier)
+                    if aspect_sentiments:
+                        st.write("Aspect-Based Sentiments:")
+                        for aspect, sentiment, confidence, clause in aspect_sentiments:
+                            st.write(f"- **{aspect}**: {sentiment} (Confidence: {confidence}) [from: '{clause}']")
+                        aspect_fig = plot_aspect_sentiments(aspect_sentiments)
+                        st.plotly_chart(aspect_fig)
+                    else:
+                        st.info("No aspects detected in the text.")
+
             else:
                 st.warning("Please enter some text to analyze!")
 
     # Tab 2: CSV File Analysis
     with tab2:
-        st.write("Upload a CSV file with reviews to analyze sentiments")
+        st.write("Upload a CSV file with reviews to analyze sentiments and aspects")
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
         
         if uploaded_file is not None:
@@ -219,33 +391,40 @@ def main():
             st.write("Preview of uploaded file:")
             st.dataframe(df.head())
 
-            # Column selection
             review_column = st.selectbox("Select the column containing reviews:", df.columns)
             
             if st.button("Analyze CSV", key="csv_analyze"):
                 with st.spinner("Analyzing reviews..."):
-                    # Initialize progress bar
                     progress_bar = st.progress(0)
                     total_rows = len(df)
                     sentiments = []
+                    all_aspect_sentiments = []
 
-                    # Predict sentiments with progress update
+                    # Process each review
                     for i, review in enumerate(df[review_column]):
                         sentiment = predict_sentence(review, model, tokenizer, bert_model, pca, analyzer, device)
                         sentiments.append(sentiment)
-                        # Update progress bar
+                        aspect_sentiments = get_aspect_sentiments(str(review), sentence_model, absa_classifier)
+                        all_aspect_sentiments.extend(aspect_sentiments)
                         progress = (i + 1) / total_rows
                         progress_bar.progress(progress)
 
-                    # Add predictions to dataframe
+                    # Add predictions to dataframe (for display)
                     df['Predicted_Sentiment'] = sentiments
-                    
+                    if all_aspect_sentiments:
+                        aspect_df = pd.DataFrame(all_aspect_sentiments, columns=['Aspect', 'Sentiment', 'Confidence', 'Clause'])
+                        df = df.join(aspect_df.groupby(df.index // len(df)).agg(lambda x: '; '.join(map(str, x))))
+
                     # Display results
-                    st.write("Analysis complete! Here's the updated dataframe:")
+                    st.write("Analysis complete! Here's the updated dataframe with all details:")
                     st.dataframe(df)
 
-                    # Generate and offer CSV download
-                    csv = df.to_csv(index=False)
+                    # Prepare simplified CSV with only reviewText and Sentiment
+                    simplified_df = pd.DataFrame({
+                        'reviewText': df[review_column],
+                        'Sentiment': df['Predicted_Sentiment']
+                    })
+                    csv = simplified_df.to_csv(index=False)
                     st.download_button(
                         label="Download results as CSV",
                         data=csv,
@@ -256,6 +435,11 @@ def main():
                     # Plot overall sentiment distribution
                     overall_fig = plot_overall_sentiment(df['Predicted_Sentiment'])
                     st.plotly_chart(overall_fig)
+
+                    # Plot aspect sentiments
+                    if all_aspect_sentiments:
+                        aspect_fig = plot_aspect_sentiments(all_aspect_sentiments)
+                        st.plotly_chart(aspect_fig)
 
 if __name__ == "__main__":
     main()
