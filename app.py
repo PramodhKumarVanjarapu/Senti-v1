@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import torch
 import torch.nn as nn
@@ -5,7 +6,15 @@ from transformers import BertTokenizer, BertModel
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import numpy as np
 import pickle
-from sklearn.decomposition import PCA  # Explicitly import PCA
+from sklearn.decomposition import PCA
+import plotly.express as px
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+import nltk
+from nltk.tokenize import word_tokenize
+
+# Download NLTK data
+nltk.download('punkt', quiet=True)
 
 # LSTMClassifier class (unchanged)
 class LSTMClassifier(nn.Module):
@@ -39,7 +48,6 @@ class LSTMClassifier(nn.Module):
 def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Load LSTM model
     try:
         model = LSTMClassifier(input_size=257, hidden_size=512, num_classes=3).to(device)
         model.load_state_dict(torch.load('model.pth', map_location=device))
@@ -48,7 +56,6 @@ def load_models():
         st.error(f"Error loading LSTM model: {e}")
         return None, None, None, None, None, None
     
-    # Load BERT components
     try:
         tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
         bert_model = BertModel.from_pretrained("bert-base-uncased").to(device)
@@ -57,7 +64,6 @@ def load_models():
         st.error(f"Error loading BERT model: {e}")
         return None, None, None, None, None, None
     
-    # Load PCA
     try:
         with open('pca_model.pkl', 'rb') as f:
             pca = pickle.load(f)
@@ -65,7 +71,6 @@ def load_models():
         st.error(f"Error loading PCA model: {e}")
         return None, None, None, None, None, None
     
-    # Initialize VADER
     analyzer = SentimentIntensityAnalyzer()
     
     return model, tokenizer, bert_model, pca, analyzer, device
@@ -103,16 +108,54 @@ def predict_sentence(sentence, model, tokenizer, bert_model, pca, analyzer, devi
         st.error(f"Prediction error: {e}")
         return None
 
+# Word-level sentiment analysis
+def get_word_sentiments(text, analyzer):
+    words = word_tokenize(text.lower())
+    word_sentiments = {}
+    for word in words:
+        score = analyzer.polarity_scores(word)['compound']
+        if score != 0:  # Only include words with non-neutral sentiment
+            word_sentiments[word] = score
+    return word_sentiments
+
+# Visualization functions
+def plot_sentiment_bar(word_sentiments):
+    if not word_sentiments:
+        return None
+    words = list(word_sentiments.keys())
+    scores = list(word_sentiments.values())
+    colors = ['red' if s < 0 else 'green' for s in scores]
+    
+    fig = px.bar(
+        x=words,
+        y=scores,
+        color=colors,
+        color_discrete_map={'red': 'red', 'green': 'green'},
+        labels={'x': 'Words', 'y': 'Sentiment Score'},
+        title='Word-Level Sentiment Distribution'
+    )
+    fig.update_layout(showlegend=False)
+    return fig
+
+def generate_wordcloud(word_sentiments):
+    if not word_sentiments:
+        return None
+    wc = WordCloud(width=800, height=400, background_color='white').generate_from_frequencies(word_sentiments)
+    fig, ax = plt.subplots()
+    ax.imshow(wc, interpolation='bilinear')
+    ax.axis('off')
+    return fig
+
 # Streamlit interface
 def main():
     st.title("Sentiment Analysis Application")
-    st.write("Enter a sentence to analyze its sentiment")
+    st.write("Enter a sentence to analyze its sentiment and see word-level insights")
 
     # Load models
     model, tokenizer, bert_model, pca, analyzer, device = load_models()
     
     if model is None:
-        return  # Stop execution if models failed to load
+        return
 
     # User input
     user_input = st.text_area("Enter your text here:", height=150)
@@ -120,14 +163,32 @@ def main():
     if st.button("Analyze Sentiment"):
         if user_input:
             with st.spinner("Analyzing..."):
+                # Overall sentiment
                 sentiment = predict_sentence(user_input, model, tokenizer, bert_model, pca, analyzer, device)
                 if sentiment:
                     if sentiment == "Positive":
-                        st.success(f"Sentiment: {sentiment} 😊")
+                        st.success(f"Overall Sentiment: {sentiment} 😊")
                     elif sentiment == "Negative":
-                        st.error(f"Sentiment: {sentiment} 😔")
+                        st.error(f"Overall Sentiment: {sentiment} 😔")
                     else:
-                        st.info(f"Sentiment: {sentiment} 😐")
+                        st.info(f"Overall Sentiment: {sentiment} 😐")
+
+                    # Word-level analysis
+                    word_sentiments = get_word_sentiments(user_input, analyzer)
+                    
+                    # Bar chart
+                    bar_fig = plot_sentiment_bar(word_sentiments)
+                    if bar_fig:
+                        st.plotly_chart(bar_fig)
+                    else:
+                        st.info("No significant word-level sentiments detected for bar chart.")
+
+                    # Word cloud
+                    wc_fig = generate_wordcloud(word_sentiments)
+                    if wc_fig:
+                        st.pyplot(wc_fig)
+                    else:
+                        st.info("No significant word-level sentiments detected for word cloud.")
         else:
             st.warning("Please enter some text to analyze!")
 
