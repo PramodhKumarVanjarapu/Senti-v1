@@ -19,11 +19,24 @@ from sklearn.metrics.pairwise import cosine_similarity
 from langdetect import detect
 import os
 import gc
+import spacy.cli  # For downloading Spacy models programmatically
 
 try:
     nltk.download('punkt', quiet=True)
 except Exception as e:
     st.error(f"Error downloading NLTK data: {e}")
+
+# Download Spacy model on startup if not present
+def ensure_spacy_model(model_name="en_core_web_sm"):
+    try:
+        spacy.load(model_name)
+    except OSError:
+        st.info(f"Downloading Spacy model '{model_name}'...")
+        spacy.cli.download(model_name)
+        st.info(f"Model '{model_name}' downloaded successfully.")
+
+# Call this at the start of the app
+ensure_spacy_model("en_core_web_sm")
 
 class LSTMClassifier(nn.Module):
     def __init__(self, input_size, hidden_size, num_classes, num_layers=2, dropout=0.3, bidirectional=True):
@@ -55,7 +68,7 @@ class LSTMClassifier(nn.Module):
 def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if not os.path.exists('model.pth'):
-        st.error("model.pth not found. Please ensure the LSTM model file is in the working directory.")
+        st.error("model.pth not found. Please upload the LSTM model file to your Streamlit Cloud repository.")
         return None, None, None, None, None, None, None, None
     try:
         model = LSTMClassifier(input_size=257, hidden_size=512, num_classes=3).to(device)
@@ -72,7 +85,7 @@ def load_models():
         st.error(f"Error loading BERT model: {e}")
         return None, None, None, None, None, None, None, None
     if not os.path.exists('pca_model.pkl'):
-        st.error("pca_model.pkl not found. Please ensure the PCA model file is in the working directory.")
+        st.error("pca_model.pkl not found. Please upload the PCA model file to your Streamlit Cloud repository.")
         return None, None, None, None, None, None, None, None
     try:
         with open('pca_model.pkl', 'rb') as f:
@@ -89,7 +102,7 @@ def load_models():
         absa_classifier = pipeline("text-classification", model=absa_model, tokenizer=absa_tokenizer)
     except Exception as e:
         st.error(f"Error loading ABSA classifier: {e}")
-        absa_classifier = None  # Fallback to None if ABSA fails
+        absa_classifier = None
     return model, tokenizer, bert_model, pca, analyzer, device, sentence_model, absa_classifier
 
 def preprocess_sentence(sentence, tokenizer, bert_model, device):
@@ -140,7 +153,12 @@ def load_language_model(text):
     try:
         return spacy.load(model_name)
     except OSError:
-        return spacy.load("en_core_web_sm")
+        st.warning(f"Language model '{model_name}' not found. Falling back to 'en_core_web_sm'.")
+        try:
+            return spacy.load("en_core_web_sm")
+        except OSError:
+            st.error("Default model 'en_core_web_sm' not found. Please ensure it’s installed.")
+            return None
 
 STOPWORDS = {
     "the", "a", "an", "is", "was", "were", "it", "this", "that", "of", "to",
@@ -148,11 +166,14 @@ STOPWORDS = {
 }
 
 def predict_aspects(text, previous_aspects=None):
+    nlp = load_language_model(text)
+    if nlp is None:
+        st.warning("No language model available. Cannot extract aspects.")
+        return []
     try:
-        nlp = load_language_model(text)
         doc = nlp(text)
     except Exception as e:
-        st.error(f"Error loading language model: {e}")
+        st.error(f"Error processing text: {e}")
         return []
     aspects = []
     previous_aspects = previous_aspects or []
@@ -213,12 +234,15 @@ def classify_sentiment_absa(text, aspect_terms, absa_classifier):
     return aspect_sentiments
 
 def split_sentences(text):
+    nlp = load_language_model(text)
+    if nlp is None:
+        st.warning("No language model available. Treating the entire text as one sentence.")
+        return [text.strip()]
     try:
-        nlp = load_language_model(text)
         doc = nlp(text)
     except Exception as e:
-        st.error(f"Error loading language model: {e}")
-        return []
+        st.error(f"Error processing text: {e}")
+        return [text.strip()]
     sentences = [sent.text.strip() for sent in doc.sents]
     final_sentences = []
     for sent in sentences:
